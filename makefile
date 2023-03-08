@@ -1,4 +1,4 @@
 make:
 	go build .
-	mv translator VMTranslator
+	mv vmtranslator VMTranslator
 	chmod +x ./VMTranslator
