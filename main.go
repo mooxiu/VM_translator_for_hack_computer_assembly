@@ -36,7 +36,6 @@ func main() {
 			continue
 		}
 		p := &parser.Parser{}
-		fmt.Println(line)
 		parsed := p.Parse(line)
 		coder.AppendComment(line + "\n")
 		coder.AppendLine(coder.Translate(parsed))
