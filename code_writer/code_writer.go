@@ -2,7 +2,7 @@ package code_writer
 
 import (
 	"os"
-	"translator/parser"
+	"vmtranslator/parser"
 )
 
 type CodeWriter struct {

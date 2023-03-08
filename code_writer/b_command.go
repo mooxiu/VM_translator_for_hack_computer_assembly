@@ -1,6 +1,6 @@
 package code_writer
 
-import "translator/parser"
+import "vmtranslator/parser"
 
 func translateBCommand(p parser.Parsed) []string {
 	// TODO

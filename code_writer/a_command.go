@@ -3,7 +3,7 @@ package code_writer
 import (
 	"fmt"
 	uuid2 "github.com/google/uuid"
-	"translator/parser"
+	"vmtranslator/parser"
 )
 
 func translateACommand(p parser.Parsed) []string {

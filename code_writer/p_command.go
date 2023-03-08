@@ -2,7 +2,7 @@ package code_writer
 
 import (
 	"fmt"
-	"translator/parser"
+	"vmtranslator/parser"
 )
 
 var (

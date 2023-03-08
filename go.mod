@@ -1,4 +1,4 @@
-module translator
+module vmtranslator
 
 go 1.19
 

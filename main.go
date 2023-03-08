@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"translator/code_writer"
-	"translator/parser"
+	"vmtranslator/code_writer"
+	"vmtranslator/parser"
 )
 
 func main() {
