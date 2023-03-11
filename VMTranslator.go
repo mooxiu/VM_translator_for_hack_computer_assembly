@@ -29,7 +29,7 @@ func main() {
 	bfScanner := bufio.NewScanner(f)
 	bfScanner.Split(bufio.ScanLines)
 	for bfScanner.Scan() {
-		line := strings.TrimSpace(bfScanner.Text())
+		line := trimLine(bfScanner.Text())
 		if len(line) == 0 {
 			continue
 		}
@@ -41,6 +41,18 @@ func main() {
 		coder.AppendComment(line + "\n")
 		coder.AppendLine(coder.Translate(parsed))
 	}
+}
+
+func trimLine(line string) string {
+	idx := strings.Index(line, "//")
+	if idx == 0 {
+		return ""
+	}
+	if idx > 0 {
+		return trimLine(line[:idx])
+	}
+	ans := strings.TrimSpace(line)
+	return ans
 }
 
 const (
@@ -79,7 +91,8 @@ type ACommand struct {
 }
 
 type BCommand struct {
-	// TODO
+	Action    string // label, goto, if-goto
+	LabelName string
 }
 
 type FCommand struct {
@@ -109,8 +122,14 @@ func parseFunctionCommand(content string) Parsed {
 }
 
 func parseBranchingCommand(content string) Parsed {
-	// TODO
-	return Parsed{}
+	contents := strings.Split(content, " ")
+	return Parsed{
+		CommandType: BranchingCommand,
+		BCommand: BCommand{
+			Action:    contents[0],
+			LabelName: contents[1],
+		},
+	}
 }
 
 func parsePushPopCommand(content string) Parsed {
@@ -279,8 +298,20 @@ func translateACommand(p Parsed) []string {
 B Command
 */
 func translateBCommand(p Parsed) []string {
-	// TODO
-	return nil
+	ans := make([]string, 0)
+	c := p.BCommand
+	switch c.Action {
+	case "label":
+		ans = append(ans, fmt.Sprintf("(%s)", c.LabelName))
+	case "goto":
+		ans = append(ans, fmt.Sprintf("@%s", c.LabelName), "0;JMP")
+	case "if-goto":
+		ans = append(ans, "@SP", "AM=M-1", "D=!M")
+		ans = append(ans, fmt.Sprintf("@%s", c.LabelName), "D;JNE")
+	default:
+		panic("not support")
+	}
+	return ans
 }
 
 /*
