@@ -3,12 +3,18 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
 
-var randomCount = 0
+var (
+	randomCount              = 0
+	functionReturnPointCount = 0
+	originals                = make(map[string][]string, 0)
+)
 
 func main() {
 	fileName := os.Args[1]
@@ -16,30 +22,81 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(f.Name())
-	writeFileName := strings.Replace(fileName, ".vm", ".asm", 1)
+	defer f.Close()
+	/*
+		create the file, and get the writer
+	*/
+	stat, _ := f.Stat()
+	var writeFileName string
+	if stat.IsDir() {
+		writeFileName = f.Name() + "/" + filepath.Base(f.Name()) + ".asm"
+	} else {
+		writeFileName = filepath.Dir(f.Name()) + "/" + strings.Replace(filepath.Base(f.Name()), ".vm", "", 1) + ".asm"
+	}
 	toWriteFile, err := os.OpenFile(writeFileName, os.O_CREATE|os.O_WRONLY, os.ModePerm)
+	coder := &CodeWriter{File: toWriteFile}
+	defer coder.CloseFile()
+	/*
+		keep each of the file into a map
+	*/
+	p := &Parser{}
+	fillMap(f)
+	if stat.IsDir() {
+		writeBootstrap(coder, p)
+	}
+	writeRes(p, coder, originals)
+}
 
+func writeBootstrap(coder *CodeWriter, p *Parser) {
+	coder.File.WriteString("@256\n")
+	coder.File.WriteString("D=A\n")
+	coder.File.WriteString("@SP\n")
+	coder.File.WriteString("M=D\n")
+	coder.AppendLine(coder.Translate(p.Parse("call Sys.init 0"), "bootstrap"))
+	coder.File.WriteString("////////////////End of BootStrap")
+}
+
+func writeRes(p *Parser, coder *CodeWriter, originals map[string][]string) {
+	for fileName, lines := range originals {
+		for _, line := range lines {
+			coder.AppendComment(line + "\n")
+			coder.AppendLine(coder.Translate(p.Parse(line), fileName))
+		}
+	}
+}
+
+func fillMap(f *os.File) {
+	stat, err := f.Stat()
 	if err != nil {
 		panic(err)
 	}
-	coder := CodeWriter{File: toWriteFile}
-	defer coder.CloseFile()
+	if !stat.IsDir() {
+		bfScanner := bufio.NewScanner(f)
+		bfScanner.Split(bufio.ScanLines)
 
-	bfScanner := bufio.NewScanner(f)
-	bfScanner.Split(bufio.ScanLines)
-	for bfScanner.Scan() {
-		line := trimLine(bfScanner.Text())
-		if len(line) == 0 {
-			continue
+		for bfScanner.Scan() {
+			line := trimLine(bfScanner.Text())
+			if len(line) == 0 {
+				continue
+			}
+			if len(line) > 2 && line[:2] == "//" {
+				continue
+			}
+			originals[stat.Name()] = append(originals[stat.Name()], line)
 		}
-		if len(line) > 2 && line[:2] == "//" {
-			continue
+	} else {
+		fileInfos, err := ioutil.ReadDir(f.Name())
+		if err != nil {
+			panic(err)
 		}
-		p := &Parser{}
-		parsed := p.Parse(line)
-		coder.AppendComment(line + "\n")
-		coder.AppendLine(coder.Translate(parsed))
+		for _, subF := range fileInfos {
+			if !subF.IsDir() && !strings.HasSuffix(subF.Name(), ".vm") {
+				continue
+			}
+			subFile, _ := os.Open(f.Name() + "/" + subF.Name())
+			defer subFile.Close()
+			fillMap(subFile)
+		}
 	}
 }
 
@@ -66,7 +123,7 @@ var (
 	arithmeticCommandsKeywords = []string{"add", "sub", "neg", "eq", "gt", "lt", "and", "or", "not"}
 	pushPopCommandsKeywords    = []string{"push", "pop"}
 	branchingCommandsKeywords  = []string{"label", "goto", "if-goto"}
-	functionCommandKeywords    = []string{"Function", "Call", "return"}
+	functionCommandKeywords    = []string{"function", "call", "return"}
 )
 
 type Parser struct {
@@ -96,7 +153,9 @@ type BCommand struct {
 }
 
 type FCommand struct {
-	// TODO
+	Action       string // return, call, function
+	FunctionName string
+	Count        int
 }
 
 func (p *Parser) Parse(content string) Parsed {
@@ -117,8 +176,25 @@ func (p *Parser) Parse(content string) Parsed {
 }
 
 func parseFunctionCommand(content string) Parsed {
-	// TODO
-	return Parsed{}
+	contents := strings.Split(content, " ")
+	if len(contents) == 1 {
+		return Parsed{
+			CommandType: FunctionCommand,
+			FCommand: FCommand{
+				Action: contents[0],
+			},
+		}
+	} else {
+		c, _ := strconv.ParseInt(contents[2], 10, 64)
+		return Parsed{
+			CommandType: FunctionCommand,
+			FCommand: FCommand{
+				Action:       contents[0],
+				FunctionName: contents[1],
+				Count:        int(c),
+			},
+		}
+	}
 }
 
 func parseBranchingCommand(content string) Parsed {
@@ -184,12 +260,12 @@ type CodeWriter struct {
 	File *os.File
 }
 
-func (c *CodeWriter) Translate(p Parsed) []string {
+func (c *CodeWriter) Translate(p Parsed, fileName string) []string {
 	switch p.CommandType {
 	case ArithmeticCommand:
 		return translateACommand(p)
 	case PushPopCommand:
-		return translatePCommand(p)
+		return translatePCommand(p, fileName)
 	case BranchingCommand:
 		return translateBCommand(p)
 	case FunctionCommand:
@@ -249,34 +325,25 @@ func translateACommand(p Parsed) []string {
 		ans = append(ans, "M=-M")
 	case "eq":
 		ans = append(ans, "@SP", "M=M-1", "A=M", "D=M")
-		ans = append(ans, "@SP", "M=M-1", "A=M")
-		ans = append(ans, "D=M-D")
+		ans = append(ans, "A=A-1", "D=M-D")
 		ans = append(ans, fmt.Sprintf("@TRUE_%d", randomCount), "D;JEQ")
-		ans = append(ans, "@SP", "A=M", "M=0", fmt.Sprintf("@FALSE_%d", randomCount), "0;JMP")
-		ans = append(ans, fmt.Sprintf("(TRUE_%d)", randomCount), "@SP", "A=M", "M=-1")
+		ans = append(ans, "@SP", "A=M-1", "M=0", fmt.Sprintf("@FALSE_%d", randomCount), "0;JMP")
+		ans = append(ans, fmt.Sprintf("(TRUE_%d)", randomCount), "@SP", "A=M-1", "M=-1")
 		ans = append(ans, fmt.Sprintf("(FALSE_%d)", randomCount))
-		ans = append(ans, "@SP", "M=M+1")
-		randomCount += 1
 	case "gt":
 		ans = append(ans, "@SP", "M=M-1", "A=M", "D=M")
-		ans = append(ans, "@SP", "M=M-1", "A=M")
-		ans = append(ans, "D=M-D")
+		ans = append(ans, "A=A-1", "D=M-D")
 		ans = append(ans, fmt.Sprintf("@TRUE_%d", randomCount), "D;JGT")
-		ans = append(ans, "@SP", "A=M", "M=0", fmt.Sprintf("@FALSE_%d", randomCount), "0;JMP")
-		ans = append(ans, fmt.Sprintf("(TRUE_%d)", randomCount), "@SP", "A=M", "M=-1")
+		ans = append(ans, "@SP", "A=M-1", "M=0", fmt.Sprintf("@FALSE_%d", randomCount), "0;JMP")
+		ans = append(ans, fmt.Sprintf("(TRUE_%d)", randomCount), "@SP", "A=M-1", "M=-1")
 		ans = append(ans, fmt.Sprintf("(FALSE_%d)", randomCount))
-		ans = append(ans, "@SP", "M=M+1")
-		randomCount += 1
 	case "lt":
 		ans = append(ans, "@SP", "M=M-1", "A=M", "D=M")
-		ans = append(ans, "@SP", "M=M-1", "A=M")
-		ans = append(ans, "D=M-D")
+		ans = append(ans, "A=A-1", "D=M-D")
 		ans = append(ans, fmt.Sprintf("@TRUE_%d", randomCount), "D;JLT")
-		ans = append(ans, "@SP", "A=M", "M=0", fmt.Sprintf("@FALSE_%d", randomCount), "0;JMP")
-		ans = append(ans, fmt.Sprintf("(TRUE_%d)", randomCount), "@SP", "A=M", "M=-1")
+		ans = append(ans, "@SP", "A=M-1", "M=0", fmt.Sprintf("@FALSE_%d", randomCount), "0;JMP")
+		ans = append(ans, fmt.Sprintf("(TRUE_%d)", randomCount), "@SP", "A=M-1", "M=-1")
 		ans = append(ans, fmt.Sprintf("(FALSE_%d)", randomCount))
-		ans = append(ans, "@SP", "M=M+1")
-		randomCount += 1
 	case "and":
 		ans = append(ans, "@SP", "M=M-1", "A=M", "D=M")
 		ans = append(ans, "@SP", "M=M-1", "A=M")
@@ -290,6 +357,7 @@ func translateACommand(p Parsed) []string {
 	case "not":
 		ans = append(ans, "@SP", "A=M-1", "M=!M")
 	}
+	randomCount += 1
 	return ans
 }
 
@@ -306,7 +374,7 @@ func translateBCommand(p Parsed) []string {
 	case "goto":
 		ans = append(ans, fmt.Sprintf("@%s", c.LabelName), "0;JMP")
 	case "if-goto":
-		ans = append(ans, "@SP", "AM=M-1", "D=!M")
+		ans = append(ans, "@SP", "AM=M-1", "D=M")
 		ans = append(ans, fmt.Sprintf("@%s", c.LabelName), "D;JNE")
 	default:
 		panic("not support")
@@ -319,8 +387,81 @@ func translateBCommand(p Parsed) []string {
 F Command
 */
 func translateFCommand(p Parsed) []string {
-	// TODO
+	ans := make([]string, 0)
+	c := p.FCommand
+	switch c.Action {
+	case "return":
+		return translateFCommandReturnType(ans, c)
+	case "function":
+		return translateFCommandFunctionType(ans, c)
+	case "call":
+		return translateFCommandCallType(ans, c)
+	default:
+		panic("not support")
+	}
 	return nil
+}
+
+func translateFCommandReturnType(ans []string, c FCommand) []string {
+	thisFrame := fmt.Sprintf("@endFrame")
+	// endFrame = LCL
+	ans = append(ans, "@LCL", "D=M", thisFrame, "M=D")
+	// retAddr = *(endFrame - 5)
+	ans = append(ans, "@5", "D=D-A", "A=D", "D=M", "@RETURN", "M=D")
+	// arg -> pop()
+	ans = append(ans, "@SP", "M=M-1", "A=M", "D=M")
+	ans = append(ans, "@ARG", "A=M", "M=D")
+	// sp = arg + 1
+	ans = append(ans, "@ARG", "D=M+1", "@SP", "M=D")
+	// that, this, arg, lcl restore
+	ans = append(ans, "@1", "D=A", thisFrame, "D=M-D", "A=D", "D=M", "@THAT", "M=D")
+	ans = append(ans, "@2", "D=A", thisFrame, "D=M-D", "A=D", "D=M", "@THIS", "M=D")
+	ans = append(ans, "@3", "D=A", thisFrame, "D=M-D", "A=D", "D=M", "@ARG", "M=D")
+	ans = append(ans, "@4", "D=A", thisFrame, "D=M-D", "A=D", "D=M", "@LCL", "M=D")
+	// go to retAddr
+	ans = append(ans, "@RETURN", "A=M", "0;JMP")
+	return ans
+}
+
+func translateFCommandFunctionType(ans []string, c FCommand) []string {
+	// inject entry point
+	ans = append(ans, fmt.Sprintf("(%s)", c.FunctionName))
+	// initialize local segment
+	for i := 0; i < c.Count; i++ {
+		ans = append(ans, "@SP", "A=M", "M=0")
+		ans = append(ans, "@SP", "M=M+1")
+	}
+	return ans
+}
+
+func translateFCommandCallType(ans []string, c FCommand) []string {
+	functionReturnPointCount++
+	// save the return address, when the execution ends, which line we want to go to
+	ans = append(ans, fmt.Sprintf("@returnPoint%d", functionReturnPointCount), "D=A")
+	ans = append(ans, "@SP", "A=M", "M=D", "@SP", "M=M+1")
+	// save, LCL, ARG, THIS, THAT
+	ans = append(ans, "// Call: LCL save")
+	ans = append(ans, "@LCL", "D=M", "@SP", "A=M", "M=D", "@SP", "M=M+1")
+
+	ans = append(ans, "// Call: ARG save")
+	ans = append(ans, "@ARG", "D=M", "@SP", "A=M", "M=D", "@SP", "M=M+1")
+
+	ans = append(ans, "// Call: THIS save")
+	ans = append(ans, "@THIS", "D=M", "@SP", "A=M", "M=D", "@SP", "M=M+1")
+
+	ans = append(ans, "// Call: THAT save")
+	ans = append(ans, "@THAT", "D=M", "@SP", "A=M", "M=D", "@SP", "M=M+1")
+
+	// reassign ARG
+	ans = append(ans, "@SP", "D=M", "@5", "D=D-A", fmt.Sprintf("@%d", c.Count), "D=D-A")
+	ans = append(ans, "@ARG", "M=D")
+	// reassign LCL
+	ans = append(ans, "@SP", "D=M", "@LCL", "M=D")
+	// go to function name
+	ans = append(ans, fmt.Sprintf("@%s", c.FunctionName), "0;JMP")
+	// insert label to
+	ans = append(ans, fmt.Sprintf("(returnPoint%d)", functionReturnPointCount))
+	return ans
 }
 
 /**
@@ -336,7 +477,7 @@ var (
 	}
 )
 
-func translatePCommand(p Parsed) []string {
+func translatePCommand(p Parsed, fileName string) []string {
 	command := p.PCommand
 	ans := make([]string, 0)
 	if command.Action == "push" {
@@ -359,7 +500,7 @@ func translatePCommand(p Parsed) []string {
 			ans = append(ans, "@SP", "M=M+1")
 		case "static":
 			// D <- @Foo.i
-			ans = append(ans, fmt.Sprintf("@Foo.%d", command.Num), "D=M")
+			ans = append(ans, fmt.Sprintf("@%s.%d", fileName, command.Num), "D=M")
 			// RAM[SP] <- D
 			ans = append(ans, "@SP", "A=M", "M=D")
 			// SP++
@@ -407,7 +548,7 @@ func translatePCommand(p Parsed) []string {
 			ans = append(ans, "@SP", "M=M-1")
 			// RAM[addr] <- RAM[SP]
 			ans = append(ans, "@SP", "A=M", "D=M")
-			ans = append(ans, fmt.Sprintf("@Foo.%d", command.Num), "M=D")
+			ans = append(ans, fmt.Sprintf("@%s.%d", fileName, command.Num), "M=D")
 		case "pointer":
 			// sp--
 			ans = append(ans, "@SP", "M=M-1")
